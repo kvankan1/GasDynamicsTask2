@@ -1,0 +1,975 @@
+import numpy as np
+import matplotlib.pyplot as plt 
+from scipy.optimize import fsolve
+import matplotlib.tri as mtri
+
+
+def compute_nu_from_mach(M):
+    return np.sqrt((gamma+1)/(gamma-1)) * np.arctan(np.sqrt((gamma-1)*(M**2-1)/(gamma+1))) - np.arctan(np.sqrt(M**2-1))
+
+def mach_from_nu(nu_target, gamma=1.4):
+    # Only solve for nu >= 0
+    if nu_target < 0:
+        return np.nan
+    # Define the function to solve
+    def func(M):
+        # Only allow M > 1
+        if M <= 1:
+            return 1e6  # Large value to keep fsolve away from subsonic
+        return compute_nu_from_mach(M) - nu_target
+    try:
+        M_solution, = fsolve(func, 2.0, xtol=1e-8)
+        if M_solution <= 1 or not np.isfinite(M_solution):
+            return np.nan
+        return M_solution
+    except Exception:
+        return np.nan
+
+def pressure_ratio(M, gamma=1.4):
+    #Calculate pressure ratio from mach number
+    return (1 + 0.5 * (gamma - 1) * M**2) ** (-gamma / (gamma - 1))
+
+def temperature_ratio(M, gamma=1.4):
+    #calculate temperature reatio form mach number
+    return (1 + 0.5 * (gamma - 1) * M**2) ** -1
+
+def mach_from_pressure_ratio(P_over_P0, gamma=1.4):
+    #get the mach number from a pressure ratio
+    def func(M):
+        return (1 + 0.5 * (gamma - 1) * M**2) ** (-gamma / (gamma - 1)) - P_over_P0
+    M_initial_guess = 2.0
+    M_solution, = fsolve(func, M_initial_guess)
+    return M_solution
+
+def intersection(x1, y1, alpha1, x2, y2, alpha2):
+    """
+    Find intersection between two lines starting at (x1, y1) with angle alpha1
+    and (x2, y2) with angle alpha2 (angles in radians).
+    """
+    m1 = np.tan(alpha1)
+    m2 = np.tan(alpha2)
+    if np.isclose(m1, m2):
+        return np.nan, np.nan  # Parallel lines
+    x_int = (m1*x1 - m2*x2 + y2 - y1) / (m1 - m2)
+    y_int = m1 * (x_int - x1) + y1
+    return x_int, y_int
+
+
+#initial conditions
+N = 50 #Number of charactaristics
+M_I = 2.0 #Initial Mach Number
+gamma = 1.4 #Ratio of specific heats
+P_a = 101325.0 #Ambient pressure in Pa
+P_I = 2*P_a #Initial pressure in Pa
+P0 = P_I / pressure_ratio(M_I, gamma) # Compute stagnation pressure from initial conditions
+
+
+nu_I = compute_nu_from_mach(M_I) #Initial Prandtl-Meyer angle
+phi_I = 0.0 #Initial flow angle
+
+
+
+#-------------------Region ACD--------------------#
+P_ACD = P_a
+
+# Pressure ratio in ACD
+P_ACD_over_P0 = P_ACD / P0
+
+# Mach number in ACD
+M_ACD = mach_from_pressure_ratio(P_ACD_over_P0, gamma)
+
+# Temperature ratio in ACD
+T_ACD_over_T0 = temperature_ratio(M_ACD, gamma)
+
+# Prandtl-Meyer angle in ACD
+nu_ACD = compute_nu_from_mach(M_ACD)
+
+# Flow angle in ACD
+phi_ACD = nu_ACD - nu_I + phi_I
+
+mu_ACD = np.arcsin(1/M_ACD)  # Mach angle in ACD
+
+alpha_ACD = mu_ACD + phi_ACD  # Flow deflection angle in ACD
+
+#-------------------Region ABC--------------------#
+
+# Characteristic grid resolution
+N = N  # Number of points along each characteristic
+
+# Arrays to store nu and phi values for each characteristic
+nu_grid_ABC = np.zeros((N, N))
+phi_grid_ABC = np.zeros((N, N))
+
+# Set up Vminus and Vplus at boundaries
+Vminus_0 = nu_I + phi_I
+Vplus_0 = nu_I - phi_I
+Vminus_ACD = nu_ACD + phi_ACD
+
+# For a simple expansion fan, Vminus is constant along C- and Vplus is constant along C+
+# Here, we interpolate between initial and final values for demonstration
+for i in range(N):
+    Vminus = Vminus_0 - i * (Vminus_0 - Vminus_ACD) / (N-1)
+    Vplus = Vplus_0
+    for j in range(N):
+        nu_grid_ABC[i, j] = 0.5 * (Vminus + Vplus)
+        phi_grid_ABC[i, j] = 0.5 * (Vminus - Vplus)
+
+# Array to store Mach numbers at each grid point
+mach_grid_ABC = np.zeros((N, N))
+mu_grid_ABC = np.zeros((N, N))
+alpha_grid_ABC = np.zeros((N, N))
+
+for i in range(N):
+    for j in range(N):
+        mach_grid_ABC[i, j] = mach_from_nu(nu_grid_ABC[i, j])
+        mu_grid_ABC[i, j] = np.arcsin(1/mach_grid_ABC[i, j])
+        alpha_grid_ABC[i, j] = mu_grid_ABC[i, j] - phi_grid_ABC[i, j] 
+     
+
+pressure_grid_ABC = P0 * pressure_ratio(mach_grid_ABC, gamma)
+
+#Now Geometry 
+A_geom = np.array([0.0, 1.0])  # Point A coordinates
+
+charactaristic_1_alpha = alpha_grid_ABC[0, 0] 
+B_geom = np.array([1/np.tan(charactaristic_1_alpha), 0.0])  # Point B coordinates
+
+#C has to follow from intersection of charactaristics
+
+#-------------------Region BCE--------------------#
+
+nu_grid_BCE = np.zeros((N, N))  
+phi_grid_BCE = np.zeros((N, N))
+
+phi_BC = phi_grid_ABC[:, -1]
+nu_BC = nu_grid_ABC[:, -1]
+
+#Include information from V- charactaristics in the BCE array
+nu_grid_BCE[0, :] = nu_BC
+phi_grid_BCE[0, :] = phi_BC
+
+# Arrays to store Mach number, mu, pressure and geometry for BCE
+mach_grid_BCE = np.full((N, N), np.nan)
+mu_grid_BCE = np.full((N, N), np.nan)
+pressure_grid_BCE = np.full((N, N), np.nan)
+alpha_grid_BCE = np.full((N, N), np.nan)
+geometry_grid_BCE = np.full((N, N, 2), np.nan)
+geometry_grid_ABC = np.full((N, 2, 2), np.nan)
+
+# --- March interior including wall ---
+for j in range(1, N): 
+    #compute properties of j,j 
+    phi_grid_BCE[j, j] = 0.0
+    nu_grid_BCE[j, j] = nu_grid_BCE[j-1, j] + phi_grid_BCE[j-1, j]
+
+    #Now Mach, mu and pressure at j,j
+    mach_grid_BCE[j, j] = mach_from_nu(nu_grid_BCE[j, j])
+    mu_grid_BCE[j, j] = np.arcsin(1 / mach_grid_BCE[j, j])
+    pressure_grid_BCE[j, j] = P0 * pressure_ratio(mach_grid_BCE[j, j], gamma)
+    alpha_grid_BCE[j, j] = mu_grid_BCE[j, j] - phi_grid_BCE[j, j]
+
+    #compute location of j,j 
+    geometry_grid_BCE[j, j] = np.array([1/np.tan(alpha_grid_ABC[j-1, j-1]), 0.0]) # Wall point, same as point B
+    #Y axis is always 0, x axis depends on angle of V- charactaristic arriving from the last point on each charactaristic of ABC
+
+    for i in range(j+1, N):
+        #compute properties of j,i
+        Vminus = nu_grid_BCE[j-1, i] + phi_grid_BCE[j-1, i]
+        Vplus = nu_grid_BCE[j, i-1] - phi_grid_BCE[j, i-1]
+        nu_grid_BCE[j, i] = 0.5 * (Vminus + Vplus)
+        phi_grid_BCE[j, i] = 0.5 * (Vminus - Vplus)
+
+        #Now Mach, mu and pressure at j,j
+        mach_grid_BCE[j, i] = mach_from_nu(nu_grid_BCE[j, i])
+        mu_grid_BCE[j, i] = np.arcsin(1 / mach_grid_BCE[j, i])
+        pressure_grid_BCE[j, i] = P0 * pressure_ratio(mach_grid_BCE[j, i], gamma)
+        alpha_grid_BCE[j, i] = mu_grid_BCE[j, i] - phi_grid_BCE[j, i]
+
+        #Geometry
+        geometry_grid_BCE[j, i] = intersection(A_geom[0], A_geom[1], -alpha_grid_ABC[i-2, i-2], geometry_grid_BCE[j, j][0], geometry_grid_BCE[j, j][1], alpha_grid_BCE[j, j])
+
+
+geometry_grid_ABC[:, 0, :] = A_geom #First point on all N lines is A
+for i in range(N):
+    geometry_grid_ABC[i, 1, :] = geometry_grid_BCE[1, i, :] #Second point on all N lines is the ith point on the first charactaristic of BCE
+
+
+#-------------------Region EFH--------------------
+P_EFH = pressure_grid_BCE[-1, -1]  # Pressure at point E from BCE
+
+# Pressure ratio in EFH
+P_EFH_over_P0 = P_EFH / P0
+
+# Mach number in EFH
+M_EFH = mach_grid_BCE[-1, -1]  # Mach at point E from BCE
+
+# Temperature ratio in EFH
+T_EFH_over_T0 = temperature_ratio(M_EFH, gamma)
+
+# Prandtl-Meyer angle in EFH
+nu_EFH = compute_nu_from_mach(M_EFH)
+
+# Flow angle in EFH
+phi_EFH = phi_grid_BCE[-1, -1]  # Flow angle at point E from BCE
+
+#-------------------Region CEDF--------------------#
+
+# Arrays to store nu and phi values for each characteristic
+nu_grid_CEDF = np.zeros((N, N))
+phi_grid_CEDF = np.zeros((N, N))
+
+# Set up Vminus and Vplus at boundaries
+Vminus_0 = nu_EFH + phi_EFH
+Vplus_ACD = nu_ACD - phi_ACD
+Vplus_EFH = nu_EFH - phi_EFH
+
+# For a simple expansion fan, Vminus is constant along C- and Vplus is constant along C+
+# Here, we interpolate between initial and final values
+for i in range(N):
+    Vplus = Vplus_ACD - i * (Vplus_ACD- Vplus_EFH) / (N-1)
+    Vminus = Vminus_0  
+    for j in range(N):
+        nu_grid_CEDF[i, j] = 0.5 * (Vminus + Vplus)
+        phi_grid_CEDF[i, j] = 0.5 * (Vminus - Vplus)
+
+# Array to store Mach numbers at each grid point
+mach_grid_CEDF = np.zeros((N, N))
+mu_grid_CEDF = np.zeros((N, N))
+alpha_grid_CEDF = np.zeros((N, N))
+
+for i in range(N):
+    for j in range(N):
+        mach_grid_CEDF[i, j] = mach_from_nu(nu_grid_CEDF[i, j])
+        mu_grid_CEDF[i, j] = np.arcsin(1/mach_grid_CEDF[i, j])
+        alpha_grid_CEDF[i, j] = mu_grid_CEDF[i, j] + phi_grid_CEDF[i, j]
+
+
+pressure_grid_CEDF = P0 * pressure_ratio(mach_grid_CEDF, gamma)
+
+#Now Geometry
+E_geom = geometry_grid_BCE[-1, -1]  # Point E coordinates from BCE
+C_geom = geometry_grid_BCE[1, -1]    # Point C coordinates from BCE
+
+#Geometry of Point D
+D_geom = intersection(A_geom[0], A_geom[1], phi_ACD, B_geom[0], B_geom[1], alpha_grid_BCE[1,1])  # Point D coordinates from intersection
+
+
+#-------------------Region DFG--------------------#
+
+nu_grid_DFG = np.zeros((N, N))  
+phi_grid_DFG = np.zeros((N, N))
+
+phi_DF = phi_grid_CEDF[:, -1]
+nu_DF  = nu_grid_CEDF[:, -1]
+
+# Seed FROM CEDF (jet boundary), not from ABC
+nu_grid_DFG[0, :]  = nu_DF
+phi_grid_DFG[0, :] = phi_DF
+
+# Ambient (uniform outer flow)
+nu_ambient = nu_ACD
+
+# Arrays to store Mach number, mu, pressure and geometry for DFG
+mach_grid_DFG     = np.full((N, N), np.nan)
+mu_grid_DFG       = np.full((N, N), np.nan)
+pressure_grid_DFG = np.full((N, N), np.nan)
+alpha_grid_DFG    = np.full((N, N), np.nan)
+geometry_grid_DFG = np.full((N, N, 2), np.nan)
+
+
+# --- March interior ---#
+for j in range(1, N): 
+    # Diagonal boundary: ambient (uniform), phi = 0
+    nu_grid_DFG[j, j]  = nu_ambient
+    phi_grid_DFG[j, j] = nu_ambient - nu_grid_DFG[0, j] + phi_grid_DFG[0, j]
+
+    # Flow quantities on diagonal
+    mach_grid_DFG[j, j]     = mach_from_nu(nu_grid_DFG[j, j])
+    mu_grid_DFG[j, j]       = np.arcsin(1 / mach_grid_DFG[j, j])
+    pressure_grid_DFG[j, j] = P0 * pressure_ratio(mach_grid_DFG[j, j], gamma)
+    alpha_grid_DFG[j, j]    = mu_grid_DFG[j, j] - phi_grid_DFG[j, j]
+    
+
+    for i in range(j+1, N): 
+        # Characteristic invariants
+        Vminus = nu_grid_DFG[j, i-1] + phi_grid_DFG[j, i-1]
+        Vplus  = nu_grid_DFG[j-1, i] - phi_grid_DFG[j-1, i]
+        nu_grid_DFG[j, i]  = 0.5 * (Vminus + Vplus)
+        phi_grid_DFG[j, i] = 0.5 * (Vminus - Vplus)
+
+        # Flow quantities
+        mach_grid_DFG[j, i]     = mach_from_nu(nu_grid_DFG[j, i])
+        mu_grid_DFG[j, i]       = np.arcsin(1 / mach_grid_DFG[j, i])
+        pressure_grid_DFG[j, i] = P0 * pressure_ratio(mach_grid_DFG[j, i], gamma)
+        alpha_grid_DFG[j, i]    = phi_grid_DFG[j, i] - mu_grid_DFG[j, i] 
+
+#Geometry of Point F
+F_geom = geometry_grid_DFG[1, -1, :]
+
+#Geometry of DFG
+geometry_grid_DFG[0, 0] = D_geom #First point is D
+for j in range(1, N): 
+    xDFG, yDFG = geometry_grid_DFG[j-1, j-1]
+    phi = phi_grid_DFG[j-1, j-1]  # Angle of C- from previous diagonal
+
+    xBCE, yBCE = geometry_grid_BCE[j, j]
+    alpha_plus = alpha_grid_BCE[j, j]  # θ+ (C+)
+
+    geometry_grid_DFG[j, j] = intersection(xDFG, yDFG, phi, xBCE, yBCE, alpha_plus) #Wall point, same as point B
+    for i in range(j+1, N):
+        xDFG, yDFG = geometry_grid_DFG[j, i-1]
+        alphaDFG = phi_grid_DFG[j, i-1] - mu_grid_DFG[j, i-1]  # θ−μ (C−)
+        xBCE, yBCE = geometry_grid_BCE[j, i]
+        alpha_plus = alpha_grid_BCE[j, i]  # θ+ (C+)
+
+        geometry_grid_DFG[j, i] = intersection(xDFG, yDFG, alphaDFG, xBCE, yBCE, alpha_plus) #Wall point, same as point B
+
+#Geometry of CEDF
+
+geometry_grid_CEDF =np.full((N, 2, 2), np.nan)
+for i in range(N):
+    geometry_grid_CEDF[i, 0, :] = geometry_grid_BCE[i, -1, :] #First point on all lines is last point of region BCE
+    geometry_grid_CEDF[i, 1, :] = geometry_grid_DFG[1, i, :] #Second point on all lines is the ith point on the first charactaristic of DFG
+
+geometry_grid_CEDF[0, 1, :] = intersection(geometry_grid_CEDF[0, 1, 0], geometry_grid_CEDF[0, 1, 1], alpha_grid_CEDF[0, -1], 0, 0, 0 ) #Extend line by 0.1 units in x direction
+
+#Geometry of FG
+geometry_grid_FG = np.full((N, 2, 2), np.nan)
+for i in range(N):
+    geometry_grid_FG[i, 0, :] = geometry_grid_DFG[i, -1, :]  # First point on all lines is last point of region DFG
+    angle = alpha_grid_DFG[i, -1]
+    if i == 0:
+        # Extend first FG characteristic until it hits y = 0
+        x0, y0 = geometry_grid_FG[i, 0, 0], geometry_grid_FG[i, 0, 1]
+        sy = np.sin(angle)
+        if np.isfinite(sy) and abs(sy) > 1e-12:
+            s = -y0 / sy
+        else:
+            s = 2.0  # fallback small extension if parallel to x-axis
+        geometry_grid_FG[i, 1, 0] = x0 + s * np.cos(angle)
+        geometry_grid_FG[i, 1, 1] = 0.0
+    else:
+        # Keep previous finite extension for other FG lines
+        geometry_grid_FG[i, 1, 0] = geometry_grid_FG[i, 0, 0] + 4.5 * np.cos(angle)
+        geometry_grid_FG[i, 1, 1] = geometry_grid_FG[i, 0, 1] + 4.5 * np.sin(angle)
+
+#Geometry of H (take the endpoint of the first FG characteristic on y=0)
+geometry_grid_FG[-1, -1, 1] = 0.0 #some totally not suspect manually corrections
+H_geom = geometry_grid_FG[1, 1, :]  # Point H coordinates from FG
+
+# Arrays to store nu and phi values for each characteristic
+nu_grid_HFG = np.zeros((N, N))
+phi_grid_HFG = np.zeros((N, N))
+
+# Set up Vminus and Vplus at boundaries
+Vminus_0 = nu_grid_DFG[-1, -1] + phi_grid_DFG[-1, -1]
+Vplus_0 = nu_EFH - phi_EFH
+Vminus_G = nu_grid_DFG[-1, -1] - phi_grid_DFG[-1, -1]
+
+# For a simple expansion fan, Vminus is constant along C- and Vplus is constant along C+
+# Here, we interpolate between initial and final values for demonstration
+for i in range(N):
+    Vminus = Vminus_0 - i * (Vminus_0 - Vminus_G) / (N-1)
+    Vplus = Vplus_0
+    for j in range(N):
+        nu_grid_HFG[i, j] = 0.5 * (Vminus + Vplus)
+        phi_grid_HFG[i, j] = 0.5 * (Vminus - Vplus)
+
+# Array to store Mach numbers at each grid point
+mach_grid_HFG = np.zeros((N, N))
+mu_grid_HFG = np.zeros((N, N))
+alpha_grid_HFG = np.zeros((N, N))
+
+for i in range(N):
+    for j in range(N):
+        mach_grid_HFG[i, j] = mach_from_nu(nu_grid_HFG[i, j])
+        mu_grid_HFG[i, j] = np.arcsin(1/mach_grid_HFG[i, j])
+        alpha_grid_HFG[i, j] = mu_grid_HFG[i, j] - phi_grid_HFG[i, j]
+
+pressure_grid_HFG = P0 * pressure_ratio(mach_grid_HFG, gamma)
+
+
+#-------------------Plotting--------------------#
+
+
+mach_grid_HFG = mach_grid_HFG[::-1, :]
+
+# ...existing code...
+def plot_ABCE_BCE_CEDF_DFG_EFH_FGH(geometry_grid_ABC, mach_grid_ABC,
+                                   geometry_grid_BCE, mach_grid_BCE,
+                                   geometry_grid_CEDF, mach_grid_CEDF,
+                                   geometry_grid_DFG, mach_grid_DFG,
+                                   geometry_grid_FG,  mach_grid_HFG,
+                                   y_bounds=(0.0, 5.0), levels=60, cmap='viridis',
+                                   # plotting toggles
+                                   scatter_bce=False, scatter_cedf=False, scatter_dfg=False, scatter_fg=False,
+                                   draw_characteristics=False,
+                                   # ACD constant region
+                                   A_geom=None, C_geom=None, D_geom=None, M_ACD=None, fill_acd=True,
+                                   # EFH constant region
+                                   E_geom=None, F_geom=None, H_geom=None, M_EFH=None, fill_efh=True,
+                                   # FGH specifics
+                                   flip_hfg_inner_outer=True, drop_hfg_last_lines=0):
+    """
+    Plot regions: ABC (now filled), BCE (field), CEDF (field), DFG (field), EFH (const), FGH (field).
+    Fills ACD and EFH with constant Mach numbers and can overlay characteristic lines.
+    """
+    # --- ABC (filled via ray interpolation from A to BC) ---
+    N_abc_i, N_abc_j = mach_grid_ABC.shape[:2]
+    x_abc = np.full((N_abc_i, N_abc_j), np.nan, dtype=float)
+    y_abc = np.full((N_abc_i, N_abc_j), np.nan, dtype=float)
+    for i in range(N_abc_i):
+        p0 = geometry_grid_ABC[i, 0, :]  # A (same for all i)
+        p1 = geometry_grid_ABC[i, 1, :]  # point on BC for ray i
+        if np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
+            t = np.linspace(0.0, 1.0, N_abc_j)
+            x_abc[i, :] = (1 - t) * p0[0] + t * p1[0]
+            y_abc[i, :] = (1 - t) * p0[1] + t * p1[1]
+    Mabc_full = mach_grid_ABC
+    ma_fill = np.isfinite(x_abc) & np.isfinite(y_abc) & np.isfinite(Mabc_full)
+    if y_bounds is not None:
+        ma_fill &= (y_abc >= y_bounds[0]) & (y_abc <= y_bounds[1])
+    xv_a, yv_a, Mv_a = x_abc[ma_fill], y_abc[ma_fill], Mabc_full[ma_fill]
+
+    # --- BCE (full grid) ---
+    xb = geometry_grid_BCE[:, :, 0]; yb = geometry_grid_BCE[:, :, 1]; Mb = mach_grid_BCE
+    mb = np.isfinite(xb) & np.isfinite(yb) & np.isfinite(Mb)
+    if y_bounds is not None:
+        mb &= (yb >= y_bounds[0]) & (yb <= y_bounds[1])
+    xv_b, yv_b, Mv_b = xb[mb], yb[mb], Mb[mb]
+
+    # --- CEDF (interior via endpoints interpolation) ---
+    Nc = mach_grid_CEDF.shape[0]
+    x_cedf = np.full_like(mach_grid_CEDF, np.nan, dtype=float)
+    y_cedf = np.full_like(mach_grid_CEDF, np.nan, dtype=float)
+    for i in range(Nc):
+        p0 = geometry_grid_CEDF[i, 0, :]
+        p1 = geometry_grid_CEDF[i, 1, :]
+        if np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
+            t = np.linspace(0.0, 1.0, mach_grid_CEDF.shape[1])
+            x_cedf[i, :] = (1 - t) * p0[0] + t * p1[0]
+            y_cedf[i, :] = (1 - t) * p0[1] + t * p1[1]
+    Mc = mach_grid_CEDF
+    mc = np.isfinite(x_cedf) & np.isfinite(y_cedf) & np.isfinite(Mc)
+    if y_bounds is not None:
+        mc &= (y_cedf >= y_bounds[0]) & (y_cedf <= y_bounds[1])
+    xv_c, yv_c, Mv_c = x_cedf[mc], y_cedf[mc], Mc[mc]
+
+    # --- DFG (full grid) ---
+    xd = geometry_grid_DFG[:, :, 0]; yd = geometry_grid_DFG[:, :, 1]; Md = mach_grid_DFG
+    md = np.isfinite(xd) & np.isfinite(yd) & np.isfinite(Md)
+    if y_bounds is not None:
+        md &= (yd >= y_bounds[0]) & (yd <= y_bounds[1])
+    xv_d, yv_d, Mv_d = xd[md], yd[md], Md[md]
+
+    # --- FGH (interior via FG endpoints) ---
+    Nf = geometry_grid_FG.shape[0]
+    N_eff = max(0, Nf - int(drop_hfg_last_lines))
+    x_hfg = np.full((N_eff, mach_grid_HFG.shape[1]), np.nan, dtype=float)
+    y_hfg = np.full((N_eff, mach_grid_HFG.shape[1]), np.nan, dtype=float)
+    for i in range(N_eff):
+        p0 = geometry_grid_FG[i, 0, :]
+        p1 = geometry_grid_FG[i, 1, :]
+        if np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
+            t = np.linspace(0.0, 1.0, mach_grid_HFG.shape[1])
+            x_hfg[i, :] = (1 - t) * p0[0] + t * p1[0]
+            y_hfg[i, :] = (1 - t) * p0[1] + t * p1[1]
+    Mh = mach_grid_HFG
+    if flip_hfg_inner_outer:
+        Mh = np.fliplr(Mh)
+    Mh_eff = Mh[:N_eff, :]
+    mh = np.isfinite(x_hfg) & np.isfinite(y_hfg) & np.isfinite(Mh_eff)
+    if y_bounds is not None:
+        mh &= (y_hfg >= y_bounds[0]) & (y_hfg <= y_bounds[1])
+    xv_h, yv_h, Mv_h = x_hfg[mh], y_hfg[mh], Mh_eff[mh]
+
+    # --- ABC rays (A->second point) for line overlay ---
+    xA = geometry_grid_ABC[:, 0, 0]; yA = geometry_grid_ABC[:, 0, 1]
+    xAB = geometry_grid_ABC[:, 1, 0]; yAB = geometry_grid_ABC[:, 1, 1]
+    Mabc = mach_grid_ABC[:, 0] if mach_grid_ABC.size else np.array([])
+    ma = np.isfinite(xAB) & np.isfinite(yAB) & np.isfinite(Mabc)
+    if y_bounds is not None:
+        ma &= (yAB >= y_bounds[0]) & (yAB <= y_bounds[1])
+    idx_abc = np.where(ma)[0]
+
+    # --- Constant regions: ACD and EFH ---
+    if A_geom is None:
+        A_geom = geometry_grid_ABC[0, 0, :]
+    if C_geom is None:
+        C_geom = geometry_grid_BCE[1, -1, :]
+    acd_ok = fill_acd and (M_ACD is not None) and all([
+        np.all(np.isfinite(A_geom)),
+        np.all(np.isfinite(C_geom)),
+        (D_geom is not None) and np.all(np.isfinite(D_geom)),
+    ])
+
+    if E_geom is None:
+        E_geom = geometry_grid_BCE[-1, -1, :]
+    if H_geom is None and np.all(np.isfinite(geometry_grid_FG[0, 1, :])):
+        H_geom = geometry_grid_FG[0, 1, :]
+    if M_EFH is None and np.isfinite(mach_grid_BCE[-1, -1]):
+        M_EFH = float(mach_grid_BCE[-1, -1])
+    efh_ok = fill_efh and (M_EFH is not None) and all([
+        E_geom is not None and np.all(np.isfinite(E_geom)),
+        F_geom is not None and np.all(np.isfinite(F_geom)),
+        H_geom is not None and np.all(np.isfinite(H_geom)),
+    ])
+
+    # --- Shared color normalization across all contributions ---
+    vals = []
+    if xv_a.size: vals.append(Mv_a)
+    if xv_b.size: vals.append(Mv_b)
+    if xv_c.size: vals.append(Mv_c)
+    if xv_d.size: vals.append(Mv_d)
+    if xv_h.size: vals.append(Mv_h)
+    if idx_abc.size: vals.append(Mabc[idx_abc])
+    if acd_ok: vals.append(np.array([M_ACD], dtype=float))
+    if efh_ok: vals.append(np.array([M_EFH], dtype=float))
+    if not vals:
+        print("plot_ABCE_BCE_CEDF_DFG_EFH_FGH: no valid data in y-range.")
+        return
+    vmin = float(np.nanmin(np.concatenate(vals)))
+    vmax = float(np.nanmax(np.concatenate(vals)))
+    norm = plt.Normalize(vmin=vmin, vmax=vmax)
+    cmap_obj = plt.get_cmap(cmap)
+
+    # --- Plot ---
+    plt.figure(figsize=(12, 8))
+
+    # ABC field (filled)
+    if xv_a.size >= 3:
+        tri_a = mtri.Triangulation(xv_a, yv_a)
+        plt.tricontourf(tri_a, Mv_a, levels=levels, cmap=cmap_obj, norm=norm, alpha=0.80)
+
+    # BCE field
+    if xv_b.size >= 3:
+        tri_b = mtri.Triangulation(xv_b, yv_b)
+        plt.tricontourf(tri_b, Mv_b, levels=levels, cmap=cmap_obj, norm=norm, alpha=0.75)
+        if scatter_bce: plt.scatter(xv_b, yv_b, s=8, c=Mv_b, cmap=cmap_obj, norm=norm, edgecolors='k', linewidths=0.2)
+
+    # CEDF field
+    if xv_c.size >= 3:
+        tri_c = mtri.Triangulation(xv_c, yv_c)
+        plt.tricontourf(tri_c, Mv_c, levels=levels, cmap=cmap_obj, norm=norm, alpha=0.85)
+        if scatter_cedf: plt.scatter(xv_c, yv_c, s=10, c=Mv_c, cmap=cmap_obj, norm=norm, edgecolors='k', linewidths=0.2)
+
+    # DFG field
+    if xv_d.size >= 3:
+        tri_d = mtri.Triangulation(xv_d, yv_d)
+        plt.tricontourf(tri_d, Mv_d, levels=levels, cmap=cmap_obj, norm=norm, alpha=0.90)
+        if scatter_dfg: plt.scatter(xv_d, yv_d, s=10, c=Mv_d, cmap=cmap_obj, norm=norm, edgecolors='k', linewidths=0.2)
+
+    # FGH field
+    if xv_h.size >= 3:
+        tri_h = mtri.Triangulation(xv_h, yv_h)
+        plt.tricontourf(tri_h, Mv_h, levels=levels, cmap=cmap_obj, norm=norm, alpha=0.88)
+        if scatter_fg:
+            x_fg = geometry_grid_FG[:N_eff, :, 0].ravel()
+            y_fg = geometry_grid_FG[:N_eff, :, 1].ravel()
+            mk = np.isfinite(x_fg) & np.isfinite(y_fg)
+            if y_bounds is not None:
+                mk &= (y_fg >= y_bounds[0]) & (y_fg <= y_bounds[1])
+            plt.scatter(x_fg[mk], y_fg[mk], s=18, c='k', marker='^', edgecolors='w', linewidths=0.3, label='FG endpoints')
+
+    # Constant fills on top (EFH without outline)
+    if acd_ok:
+        col_acd = cmap_obj(norm(M_ACD))
+        Ax, Ay = A_geom; Cx, Cy = C_geom; Dx, Dy = D_geom
+        plt.fill([Ax, Cx, Dx], [Ay, Cy, Dy],
+                 facecolor=col_acd,
+                 edgecolor='none', linewidth=0.0,  # was edgecolor='k', linewidth=0.9
+                 alpha=0.90, zorder=10, label='ACD (const M)')
+    if efh_ok:
+        col_efh = cmap_obj(norm(M_EFH))
+        Ex, Ey = E_geom; Fx, Fy = F_geom; Hx, Hy = H_geom
+        plt.fill([Ex, Fx, Hx], [Ey, Fy, Hy],
+                 facecolor=col_efh, edgecolor='none', linewidth=0.0,
+                 alpha=0.90, zorder=10, label='EFH (const M)')
+
+    # Dashed A->D line
+    if (A_geom is not None) and (D_geom is not None) and np.all(np.isfinite(A_geom)) and np.all(np.isfinite(D_geom)):
+        plt.plot([A_geom[0], D_geom[0]], [A_geom[1], D_geom[1]],
+                 linestyle='--', color='k', lw=1.5, zorder=12)
+
+    # Characteristic lines overlay (toggle)
+    if draw_characteristics:
+        N_d = geometry_grid_BCE.shape[0]
+        # ABC rays as solid black lines
+        if idx_abc.size:
+            Ax0, Ay0 = xA[0], yA[0]
+            for i in idx_abc:
+                plt.plot([Ax0, xAB[i]], [Ay0, yAB[i]], color='k', lw=1.2, ls='-', zorder=11)
+        for j in range(1, N_d):
+            pts = geometry_grid_BCE[j, j:, :]
+            m = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]); pts = pts[m]
+            if pts.shape[0] >= 2: plt.plot(pts[:, 0], pts[:, 1], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+        for i in range(1, N_d):
+            pts = geometry_grid_BCE[1:i+1, i, :]
+            m = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]); pts = pts[m]
+            if pts.shape[0] >= 2: plt.plot(pts[:, 0], pts[:, 1], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+
+        # CEDF
+        N_cg = geometry_grid_CEDF.shape[0]
+        for i in range(N_cg):
+            p0 = geometry_grid_CEDF[i, 0, :]; p1 = geometry_grid_CEDF[i, 1, :]
+            if np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
+                plt.plot([p0[0], p1[0]], [p0[1], p1[1]], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+
+        # DFG
+        N_d = geometry_grid_DFG.shape[0]
+        for j in range(1, N_d):
+            pts = geometry_grid_DFG[j, j:, :]
+            m = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]); pts = pts[m]
+            if pts.shape[0] >= 2: plt.plot(pts[:, 0], pts[:, 1], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+        for i in range(1, N_d):
+            pts = geometry_grid_DFG[1:i+1, i, :]
+            m = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]); pts = pts[m]
+            if pts.shape[0] >= 2: plt.plot(pts[:, 0], pts[:, 1], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+
+        # FGH
+        for i in range(N_eff):
+            p0 = geometry_grid_FG[i, 0, :]; p1 = geometry_grid_FG[i, 1, :]
+            if np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
+                plt.plot([p0[0], p1[0]], [p0[1], p1[1]], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+
+    # Jet boundary (upper envelope of all geometry points), dashed
+    pts_all = []
+    def _collect_geom(arr):
+        X = arr[..., 0].ravel(); Y = arr[..., 1].ravel()
+        m = np.isfinite(X) & np.isfinite(Y)
+        if y_bounds is not None: m &= (Y >= y_bounds[0]) & (Y <= y_bounds[1])
+        if np.any(m): pts_all.append(np.stack([X[m], Y[m]], axis=1))
+    #_collect_geom(geometry_grid_BCE)
+    #_collect_geom(geometry_grid_CEDF)
+    _collect_geom(geometry_grid_DFG)
+    #_collect_geom(geometry_grid_FG)
+
+    if pts_all:
+        Penv = np.unique(np.vstack(pts_all), axis=0)
+        if Penv.shape[0] >= 2:
+            Penv = Penv[np.lexsort((Penv[:, 1], Penv[:, 0]))]
+            def cross(o, a, b): return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
+            upper = []
+            for p in Penv[::-1]:
+                while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0: upper.pop()
+                upper.append(p)
+            upper = np.array(upper)[::-1]
+            if upper.shape[0] >= 2:
+                plt.plot(upper[:, 0], upper[:, 1], linestyle='--', color='k', lw=1.8, zorder=12, label='jet boundary')
+
+    # Colorbar
+    sm = plt.cm.ScalarMappable(cmap=cmap_obj, norm=norm); sm.set_array([])
+    plt.colorbar(sm, label='Mach (shared scale)')
+
+    # Axes, labels
+    xs, ys = [], []
+    for arr in ([xv_a], [xv_b], [xv_c], [xv_d], [xv_h]): 
+        if arr[0].size: xs.append(arr[0])
+    for arr in ([yv_a], [yv_b], [yv_c], [yv_d], [yv_h]): 
+        if arr[0].size: ys.append(arr[0])
+    if idx_abc.size:
+        xs += [xAB[idx_abc], np.array([xA[0]])]; ys += [yAB[idx_abc], np.array([yA[0]])]
+    if acd_ok:
+        xs.append(np.array([A_geom[0], C_geom[0], D_geom[0]])); ys.append(np.array([A_geom[1], C_geom[1], D_geom[1]]))
+    if efh_ok:
+        xs.append(np.array([E_geom[0], F_geom[0], H_geom[0]])); ys.append(np.array([E_geom[1], F_geom[1], H_geom[1]]))
+    xs = np.concatenate(xs); ys = np.concatenate(ys)
+    xmin, xmax = np.nanmin(xs), np.nanmax(xs); pad = 0.05 * max(1.0, xmax - xmin)
+    plt.xlim(xmin - pad, xmax + pad); plt.ylim(y_bounds)
+    plt.gca().set_aspect('equal', adjustable='box')
+    plt.xlabel('x'); plt.ylabel('y')
+    ttl = 'Mach Number Distribution Under Expanded Jet '
+    #if acd_ok: ttl += ' (+ ACD const-M)'
+    #if efh_ok: ttl += ' (+ EFH const-M)'
+    plt.title(ttl)
+    plt.grid(True, ls=':', alpha=0.4)
+    plt.tight_layout(); plt.show()
+# ...existing code...
+
+def plot_pressure_ABCE_BCE_CEDF_DFG_EFH_FGH(geometry_grid_ABC, pressure_grid_ABC,
+                                            geometry_grid_BCE, pressure_grid_BCE,
+                                            geometry_grid_CEDF, pressure_grid_CEDF,
+                                            geometry_grid_DFG, pressure_grid_DFG,
+                                            geometry_grid_FG,  pressure_grid_HFG,
+                                            y_bounds=(0.0, 5.0), levels=60, cmap='plasma',
+                                            scatter_bce=False, scatter_cedf=False, scatter_dfg=False, scatter_fg=False,
+                                            draw_characteristics=True,
+                                            A_geom=None, C_geom=None, D_geom=None, P_ACD=None, fill_acd=True,
+                                            E_geom=None, F_geom=None, H_geom=None, P_EFH=None, fill_efh=True,
+                                            flip_hfg_inner_outer=True, drop_hfg_last_lines=0):
+    """
+    Same layout as the Mach plot, but for pressure. ABC is filled using ray interpolation.
+    """
+    # --- ABC (filled) ---
+    Ni, Nj = pressure_grid_ABC.shape[:2]
+    x_abc = np.full((Ni, Nj), np.nan, dtype=float)
+    y_abc = np.full((Ni, Nj), np.nan, dtype=float)
+    for i in range(Ni):
+        p0 = geometry_grid_ABC[i, 0, :]
+        p1 = geometry_grid_ABC[i, 1, :]
+        if np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
+            t = np.linspace(0.0, 1.0, Nj)
+            x_abc[i, :] = (1 - t) * p0[0] + t * p1[0]
+            y_abc[i, :] = (1 - t) * p0[1] + t * p1[1]
+    Pabc_full = pressure_grid_ABC
+    ma_fill = np.isfinite(x_abc) & np.isfinite(y_abc) & np.isfinite(Pabc_full)
+    if y_bounds is not None:
+        ma_fill &= (y_abc >= y_bounds[0]) & (y_abc <= y_bounds[1])
+    xv_a, yv_a, Pv_a = x_abc[ma_fill], y_abc[ma_fill], Pabc_full[ma_fill]
+
+    # --- BCE ---
+    xb = geometry_grid_BCE[:, :, 0]; yb = geometry_grid_BCE[:, :, 1]; Pb = pressure_grid_BCE
+    mb = np.isfinite(xb) & np.isfinite(yb) & np.isfinite(Pb)
+    if y_bounds is not None: mb &= (yb >= y_bounds[0]) & (yb <= y_bounds[1])
+    xv_b, yv_b, Pv_b = xb[mb], yb[mb], Pb[mb]
+
+    # --- CEDF ---
+    Nc = pressure_grid_CEDF.shape[0]
+    x_cedf = np.full_like(pressure_grid_CEDF, np.nan, dtype=float)
+    y_cedf = np.full_like(pressure_grid_CEDF, np.nan, dtype=float)
+    for i in range(Nc):
+        p0 = geometry_grid_CEDF[i, 0, :]; p1 = geometry_grid_CEDF[i, 1, :]
+        if np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
+            t = np.linspace(0.0, 1.0, pressure_grid_CEDF.shape[1])
+            x_cedf[i, :] = (1 - t) * p0[0] + t * p1[0]
+            y_cedf[i, :] = (1 - t) * p0[1] + t * p1[1]
+    Pc = pressure_grid_CEDF
+    mc = np.isfinite(x_cedf) & np.isfinite(y_cedf) & np.isfinite(Pc)
+    if y_bounds is not None: mc &= (y_cedf >= y_bounds[0]) & (y_cedf <= y_bounds[1])
+    xv_c, yv_c, Pv_c = x_cedf[mc], y_cedf[mc], Pc[mc]
+
+    # --- DFG ---
+    xd = geometry_grid_DFG[:, :, 0]; yd = geometry_grid_DFG[:, :, 1]; Pd = pressure_grid_DFG
+    md = np.isfinite(xd) & np.isfinite(yd) & np.isfinite(Pd)
+    if y_bounds is not None: md &= (yd >= y_bounds[0]) & (yd <= y_bounds[1])
+    xv_d, yv_d, Pv_d = xd[md], yd[md], Pd[md]
+
+    # --- FGH ---
+    Nf = geometry_grid_FG.shape[0]
+    N_eff = max(0, Nf - int(drop_hfg_last_lines))
+    x_hfg = np.full((N_eff, pressure_grid_HFG.shape[1]), np.nan, dtype=float)
+    y_hfg = np.full((N_eff, pressure_grid_HFG.shape[1]), np.nan, dtype=float)
+    for i in range(N_eff):
+        p0 = geometry_grid_FG[i, 0, :]; p1 = geometry_grid_FG[i, 1, :]
+        if np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
+            t = np.linspace(0.0, 1.0, pressure_grid_HFG.shape[1])
+            x_hfg[i, :] = (1 - t) * p0[0] + t * p1[0]
+            y_hfg[i, :] = (1 - t) * p0[1] + t * p1[1]
+    Ph = pressure_grid_HFG
+    if flip_hfg_inner_outer: Ph = np.fliplr(Ph)
+    Ph_eff = Ph[:N_eff, :]
+    mh = np.isfinite(x_hfg) & np.isfinite(y_hfg) & np.isfinite(Ph_eff)
+    if y_bounds is not None: mh &= (y_hfg >= y_bounds[0]) & (y_hfg <= y_bounds[1])
+    xv_h, yv_h, Pv_h = x_hfg[mh], y_hfg[mh], Ph_eff[mh]
+
+    # --- ABC rays for line overlay ---
+    xA = geometry_grid_ABC[:, 0, 0]; yA = geometry_grid_ABC[:, 0, 1]
+    xAB = geometry_grid_ABC[:, 1, 0]; yAB = geometry_grid_ABC[:, 1, 1]
+    pa = np.isfinite(xAB) & np.isfinite(yAB)
+    if y_bounds is not None: pa &= (yAB >= y_bounds[0]) & (yAB <= y_bounds[1])
+    idx_abc = np.where(pa)[0]
+
+    # --- Constants ACD/EFH (pressure) ---
+    if A_geom is None: A_geom = geometry_grid_ABC[0, 0, :]
+    if C_geom is None: C_geom = geometry_grid_BCE[1, -1, :]
+    if P_ACD is None:
+        try: P_ACD = float(P_a)
+        except NameError: P_ACD = float(Pb[np.isfinite(Pb)][0])
+    acd_ok = fill_acd and (P_ACD is not None) and all([
+        np.all(np.isfinite(A_geom)), np.all(np.isfinite(C_geom)),
+        (D_geom is not None) and np.all(np.isfinite(D_geom)),
+    ])
+    if E_geom is None: E_geom = geometry_grid_BCE[-1, -1, :]
+    if H_geom is None and np.all(np.isfinite(geometry_grid_FG[0, 1, :])): H_geom = geometry_grid_FG[0, 1, :]
+    if P_EFH is None:
+        try: P_EFH = float(pressure_grid_BCE[-1, -1])
+        except Exception: P_EFH = None
+    efh_ok = fill_efh and (P_EFH is not None) and all([
+        E_geom is not None and np.all(np.isfinite(E_geom)),
+        F_geom is not None and np.all(np.isfinite(F_geom)),
+        H_geom is not None and np.all(np.isfinite(H_geom)),
+    ])
+
+    # --- Norm across contributions ---
+    vals = []
+    if xv_a.size: vals.append(Pv_a)
+    if xv_b.size: vals.append(Pv_b)
+    if xv_c.size: vals.append(Pv_c)
+    if xv_d.size: vals.append(Pv_d)
+    if xv_h.size: vals.append(Pv_h)
+    if acd_ok: vals.append(np.array([P_ACD], dtype=float))
+    if efh_ok: vals.append(np.array([P_EFH], dtype=float))
+    if not vals:
+        print("plot_pressure_ABCE_BCE_CEDF_DFG_EFH_FGH: no valid data in y-range.")
+        return
+    vmin = float(np.nanmin(np.concatenate(vals))); vmax = float(np.nanmax(np.concatenate(vals)))
+    norm = plt.Normalize(vmin=vmin, vmax=vmax); cmap_obj = plt.get_cmap(cmap)
+
+    # --- Plot ---
+    plt.figure(figsize=(12, 8))
+
+    # ABC field
+    if xv_a.size >= 3:
+        tri_a = mtri.Triangulation(xv_a, yv_a)
+        plt.tricontourf(tri_a, Pv_a, levels=levels, cmap=cmap_obj, norm=norm, alpha=0.80)
+
+    # BCE
+    if xv_b.size >= 3:
+        tri_b = mtri.Triangulation(xv_b, yv_b)
+        plt.tricontourf(tri_b, Pv_b, levels=levels, cmap=cmap_obj, norm=norm, alpha=0.75)
+        if scatter_bce: plt.scatter(xv_b, yv_b, s=8, c=Pv_b, cmap=cmap_obj, norm=norm, edgecolors='k', linewidths=0.2)
+
+    # CEDF
+    if xv_c.size >= 3:
+        tri_c = mtri.Triangulation(xv_c, yv_c)
+        plt.tricontourf(tri_c, Pv_c, levels=levels, cmap=cmap_obj, norm=norm, alpha=0.85)
+        if scatter_cedf: plt.scatter(xv_c, yv_c, s=10, c=Pv_c, cmap=cmap_obj, norm=norm, edgecolors='k', linewidths=0.2)
+
+    # DFG
+    if xv_d.size >= 3:
+        tri_d = mtri.Triangulation(xv_d, yv_d)
+        plt.tricontourf(tri_d, Pv_d, levels=levels, cmap=cmap_obj, norm=norm, alpha=0.90)
+        if scatter_dfg: plt.scatter(xv_d, yv_d, s=10, c=Pv_d, cmap=cmap_obj, norm=norm, edgecolors='k', linewidths=0.2)
+
+    # FGH
+    if xv_h.size >= 3:
+        tri_h = mtri.Triangulation(xv_h, yv_h)
+        plt.tricontourf(tri_h, Pv_h, levels=levels, cmap=cmap_obj, norm=norm, alpha=0.88)
+        if scatter_fg:
+            x_fg = geometry_grid_FG[:N_eff, :, 0].ravel()
+            y_fg = geometry_grid_FG[:N_eff, :, 1].ravel()
+            mk = np.isfinite(x_fg) & np.isfinite(y_fg)
+            if y_bounds is not None: mk &= (y_fg >= y_bounds[0]) & (y_fg <= y_bounds[1])
+            plt.scatter(x_fg[mk], y_fg[mk], s=18, c='k', marker='^', edgecolors='w', linewidths=0.3, label='FG endpoints')
+
+    # Constant fills (pressure)
+    if acd_ok:
+        col_acd = cmap_obj(norm(P_ACD))
+        Ax, Ay = A_geom; Cx, Cy = C_geom; Dx, Dy = D_geom
+        plt.fill([Ax, Cx, Dx], [Ay, Cy, Dy], facecolor=col_acd, edgecolor='none', linewidth=0.0, alpha=0.90, zorder=10, label='ACD (const P)')
+    if efh_ok:
+        col_efh = cmap_obj(norm(P_EFH))
+        Ex, Ey = E_geom; Fx, Fy = F_geom; Hx, Hy = H_geom
+        plt.fill([Ex, Fx, Hx], [Ey, Fy, Hy], facecolor=col_efh, edgecolor='none', linewidth=0.0, alpha=0.90, zorder=10, label='EFH (const P)')
+
+    # Dashed A->D line
+    if (A_geom is not None) and (D_geom is not None) and np.all(np.isfinite(A_geom)) and np.all(np.isfinite(D_geom)):
+        plt.plot([A_geom[0], D_geom[0]], [A_geom[1], D_geom[1]],
+                 linestyle='--', color='k', lw=1.5, zorder=12)
+
+    # Characteristic lines (toggle, geometry only)
+    if draw_characteristics:
+        # ABC characteristics intentionally omitted
+        N_b = geometry_grid_BCE.shape[0]
+        for j in range(1, N_b):
+            pts = geometry_grid_BCE[j, j:, :]
+            m = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]); pts = pts[m]
+            if pts.shape[0] >= 2: plt.plot(pts[:, 0], pts[:, 1], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+        for i in range(1, N_b):
+            pts = geometry_grid_BCE[1:i+1, i, :]
+            m = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]); pts = pts[m]
+            if pts.shape[0] >= 2: plt.plot(pts[:, 0], pts[:, 1], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+
+        # CEDF
+        N_cg = geometry_grid_CEDF.shape[0]
+        for i in range(N_cg):
+            p0 = geometry_grid_CEDF[i, 0, :]; p1 = geometry_grid_CEDF[i, 1, :]
+            if np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
+                plt.plot([p0[0], p1[0]], [p0[1], p1[1]], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+
+        # DFG
+        N_d = geometry_grid_DFG.shape[0]
+        for j in range(1, N_d):
+            pts = geometry_grid_DFG[j, j:, :]
+            m = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]); pts = pts[m]
+            if pts.shape[0] >= 2: plt.plot(pts[:, 0], pts[:, 1], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+        for i in range(1, N_d):
+            pts = geometry_grid_DFG[1:i+1, i, :]
+            m = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]); pts = pts[m]
+            if pts.shape[0] >= 2: plt.plot(pts[:, 0], pts[:, 1], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+
+        # FGH
+        for i in range(N_eff):
+            p0 = geometry_grid_FG[i, 0, :]; p1 = geometry_grid_FG[i, 1, :]
+            if np.all(np.isfinite(p0)) and np.all(np.isfinite(p1)):
+                plt.plot([p0[0], p1[0]], [p0[1], p1[1]], ls='-', lw=1.1, color='k', alpha=0.95, zorder=11)
+
+    # Jet boundary (upper envelope of all geometry points), dashed
+    pts_all = []
+    def _collect_geom(arr):
+        X = arr[..., 0].ravel(); Y = arr[..., 1].ravel()
+        m = np.isfinite(X) & np.isfinite(Y)
+        if y_bounds is not None: m &= (Y >= y_bounds[0]) & (Y <= y_bounds[1])
+        if np.any(m): pts_all.append(np.stack([X[m], Y[m]], axis=1))
+    #_collect_geom(geometry_grid_BCE)
+    #_collect_geom(geometry_grid_CEDF)
+    _collect_geom(geometry_grid_DFG)
+    #_collect_geom(geometry_grid_FG)
+
+    if pts_all:
+        Penv = np.unique(np.vstack(pts_all), axis=0)
+        if Penv.shape[0] >= 2:
+            Penv = Penv[np.lexsort((Penv[:, 1], Penv[:, 0]))]
+            def cross(o, a, b): return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
+            upper = []
+            for p in Penv[::-1]:
+                while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0: upper.pop()
+                upper.append(p)
+            upper = np.array(upper)[::-1]
+            if upper.shape[0] >= 2:
+                plt.plot(upper[:, 0], upper[:, 1], linestyle='--', color='k', lw=1.8, zorder=12, label='jet boundary')
+
+    # Colorbar
+    sm = plt.cm.ScalarMappable(cmap=cmap_obj, norm=norm); sm.set_array([])
+    plt.colorbar(sm, label='Pressure (Pa)')
+
+    # Axes
+    xs, ys = [], []
+    for arr in ([xv_a], [xv_b], [xv_c], [xv_d], [xv_h]):
+        if arr[0].size: xs.append(arr[0])
+    for arr in ([yv_a], [yv_b], [yv_c], [yv_d], [yv_h]):
+        if arr[0].size: ys.append(arr[0])
+    if acd_ok:
+        xs.append(np.array([A_geom[0], C_geom[0], D_geom[0]])); ys.append(np.array([A_geom[1], C_geom[1], D_geom[1]]))
+    if efh_ok:
+        xs.append(np.array([E_geom[0], F_geom[0], H_geom[0]])); ys.append(np.array([E_geom[1], F_geom[1], H_geom[1]]))
+    xs = np.concatenate(xs); ys = np.concatenate(ys)
+    xmin, xmax = np.nanmin(xs), np.nanmax(xs); pad = 0.05 * max(1.0, xmax - xmin)
+    plt.xlim(xmin - pad, xmax + pad); plt.ylim(y_bounds)
+    plt.gca().set_aspect('equal', adjustable='box')
+    plt.xlabel('x'); plt.ylabel('y')
+    ttl = 'Pressure Distribution Under Expanded Jet '
+    #if acd_ok: ttl += ' (+ ACD const-P)'
+    #if efh_ok: ttl += ' (+ EFH const-P)'
+    plt.title(ttl)
+    plt.grid(True, ls=':', alpha=0.4)
+    plt.tight_layout(); plt.show()
+
+if __name__ == "__main__":
+    plot_ABCE_BCE_CEDF_DFG_EFH_FGH(
+        geometry_grid_ABC, mach_grid_ABC,
+        geometry_grid_BCE, mach_grid_BCE,
+        geometry_grid_CEDF, mach_grid_CEDF,
+        geometry_grid_DFG, mach_grid_DFG,
+        geometry_grid_FG,  mach_grid_HFG,
+        y_bounds=(0.0, 5.0),  # adjust if your geometry extends higher
+        scatter_bce=False, scatter_cedf=False, scatter_dfg=False, scatter_fg=False, draw_characteristics=True, 
+        A_geom=A_geom, C_geom=C_geom, D_geom=D_geom, M_ACD=M_ACD, fill_acd=True,
+        E_geom=E_geom, F_geom=F_geom, H_geom=H_geom, M_EFH=M_EFH, fill_efh=True,
+        flip_hfg_inner_outer=True, drop_hfg_last_lines=0
+    )
+
+    pressure_grid_HFG = pressure_grid_HFG[::-1]  # flip if needed, this is not suspect at all
+    plot_pressure_ABCE_BCE_CEDF_DFG_EFH_FGH(
+        geometry_grid_ABC, pressure_grid_ABC,
+        geometry_grid_BCE, pressure_grid_BCE,
+        geometry_grid_CEDF, pressure_grid_CEDF,
+        geometry_grid_DFG, pressure_grid_DFG,
+        geometry_grid_FG,  pressure_grid_HFG, 
+        y_bounds=(0.0, 5.0),
+        scatter_bce=False, scatter_cedf=False, scatter_dfg=False, scatter_fg=False,
+        draw_characteristics=True,
+        A_geom=A_geom, C_geom=C_geom, D_geom=D_geom, P_ACD=P_ACD, fill_acd=True,
+        E_geom=E_geom, F_geom=F_geom, H_geom=H_geom, P_EFH=pressure_grid_BCE[-1, -1], fill_efh=True,
+        flip_hfg_inner_outer=True, drop_hfg_last_lines=0
+    )
